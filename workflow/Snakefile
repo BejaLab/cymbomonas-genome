@@ -12,17 +12,17 @@ def read_groups(glob):
 paired = read_groups("rnaseq/paired/{reads}_1.fq.gz")
 single = read_groups("rnaseq/single/{reads}_R1_001.fastq.gz")
 
-datasets = "references/{dataset}"
-
 rule all:
     input:
-        "analysis/homologs.faa"
+        "analysis/references/homologs.cdhit",
+        "analysis/star/paired.Aligned.sortedByCoord.out.bam",
+        "analysis/star/single.Aligned.sortedByCoord.out.bam"
 
 rule get_homologs:
     input:
-        "references/{dataset}"
+        "references"
     output:
-        directory("analysis/homologs/{dataset}")
+        directory("analysis/references/homologs")
     params:
         min_taxa = 3,
         ident = 60
@@ -31,9 +31,9 @@ rule get_homologs:
     conda:
         "envs/get_homologs.yaml"
     threads:
-        20
+        40
     shell:
-        "get_homologues.pl -M -t {params.min_taxa} -d {input} -n {threads} -X -S {params.ident} && mv {wildcards.dataset}_homologues {output}"
+        "get_homologues.pl -M -t {params.min_taxa} -d {input} -n {threads} -X -S {params.ident} && mv {input}_homologues {output}"
 
 rule star_index:
     input:
@@ -107,11 +107,89 @@ rule trim_single:
 
 rule cat_homologs:
     input:
-        expand("analysis/homologs/{dataset}", dataset = datasets)
+        "analysis/references/homologs"
     output:
-        "analysis/homologs.faa"
+        "analysis/references/homologs.faa"
     conda:
         "envs/tools.yaml"
     shell:
-        "find {input} -name '*.faa' | parallel seqkit sort -rl {{}} \| seqkit head -n1 > {output}"
+        "find {input} -name '*.faa' | xargs cat > {output}"
 
+rule cdhit_homologs:
+    input:
+        "analysis/references/homologs.faa"
+    output:
+        "analysis/references/homologs.cdhit"
+    params:
+        c = 0.9
+    conda:
+        "envs/tools.yaml"
+    shell:
+        "cdhit -i {input} -o {output} -c {params.c} -d 0"
+
+rule bastx_homologs:
+    input:
+        homologs = "analysis/references/homologs.cdhit",
+        assembly = "assembly/genome.fasta"
+    output:
+        "analysis/references/homologs.outfmt6"
+    params:
+        evalue = 1e-10
+    conda:
+        "envs/diamond.yaml"
+    threads:
+        20
+    shell:
+        "diamond blastx -k 100000 --max-hsps 100000 --query {input.assembly} --db {input.homologs} --outfmt 6 --out {output} --threads {threads} --evalue {params.evalue}"
+
+rule red:
+    input:
+        "assembly/genome.fasta"
+    output:
+        tbl = directory("analysis/red/tbl"),
+        sco = directory("analysis/red/sco"),
+        cnd = directory("analysis/red/cnd"),
+        rpt = directory("analysis/red/rpt"),
+        msk = directory("analysis/red/msk"),
+        hmm = "analysis/red/red.hmm"
+    params:
+        dirname = "analysis/red"
+    shadow:
+        "minimal"
+    conda:
+        "envs/red.yaml"
+    shell:
+        """
+        mkdir -p {output.tbl} {output.sco} {output.cnd} {output.rpt} {output.msk}
+        ln -s {input} genome.fa
+        Red -gnm . -tbl {output.tbl} -sco {output.sco} -cnd {output.cnd} -rpt {output.rpt} -msk {output.msk} -frm 2 -hmo {output.hmm}
+        """
+
+rule mask:
+    input:
+        assembly = "assembly/genome.fasta"
+        rpt = "analysis/red/rpt",
+        blastx = "analysis/references/homologs.outfmt6",
+        viruses = "viral_elements"
+    output:
+        "analysis/assembly/masked.fasta"
+    shell:
+        ""
+
+rule braker:
+    input:
+        masked = "analysis/assembly/masked.fasta",
+        mask = "analysis/mask/merged",
+        bam = [ "analysis/star/paired.Aligned.sortedByCoord.out.bam", "analysis/star/single.Aligned.sortedByCoord.out.bam" ],
+        homologs = "analysis/references/homologs.cdhit"
+    output:
+        ""
+    params:
+        species = "genome_red_subtract",
+        gc_prob = 0.05
+    conda:
+        "envs/braker2.yaml"
+    threads:
+        20
+    shell:
+        "braker --genome {input.masked} --species {params.species} --bam {input.bam} --prot_seq {input.homologs} --etpmode --cores {threads} --addUTR on --softmasking --gc_probability {params.gc_prob}"
