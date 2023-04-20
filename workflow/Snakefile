@@ -1,0 +1,117 @@
+
+from collections import defaultdict
+
+def read_groups(glob):
+    reads ,= glob_wildcards(glob)
+    groups = {}
+    for read in reads:
+        group_name, lane = read.rsplit('_', 1)
+        groups[read] = group_name
+    return groups
+
+paired = read_groups("rnaseq/paired/{reads}_1.fq.gz")
+single = read_groups("rnaseq/single/{reads}_R1_001.fastq.gz")
+
+datasets = "references/{dataset}"
+
+rule all:
+    input:
+        "analysis/homologs.faa"
+
+rule get_homologs:
+    input:
+        "references/{dataset}"
+    output:
+        directory("analysis/homologs/{dataset}")
+    params:
+        min_taxa = 3,
+        ident = 60
+    shadow:
+        "minimal"
+    conda:
+        "envs/get_homologs.yaml"
+    threads:
+        20
+    shell:
+        "get_homologues.pl -M -t {params.min_taxa} -d {input} -n {threads} -X -S {params.ident} && mv {wildcards.dataset}_homologues {output}"
+
+rule star_index:
+    input:
+        "assembly/genome.fasta"
+    output:
+        directory("analysis/star/genome")
+    conda:
+        "envs/star.yaml"
+    shell:
+        "STAR --genomeSAindexNbases 10 --runMode genomeGenerate --genomeFastaFiles {input} --genomeDir {output}"
+
+rule star_map_single:
+    input:
+        index = "analysis/star/genome",
+        reads = expand("analysis/rnaseq/trimmed/single/{reads}_R1_001_trimmed.fq.gz", reads = single.keys())
+    output:
+        "analysis/star/single.Aligned.sortedByCoord.out.bam"
+    params:
+        prefix = "analysis/star/single",
+        reads = lambda w, input: ','.join(input.reads),
+        groups = lambda w: ' , '.join([ "ID:" + x for x in single.values() ])
+    conda:
+        "envs/star.yaml"
+    threads:
+        workflow.cores
+    shell:
+        "STAR --runThreadN {threads} --genomeDir {input.index} --readFilesCommand zcat --readFilesIn {params.reads} --outSAMattrRGline {params.groups} --outFileNamePrefix {params.prefix}. --outSAMtype BAM SortedByCoordinate"
+
+rule star_map_paired:
+    input:
+        index = "analysis/star/genome",
+        left  = expand("analysis/rnaseq/trimmed/paired/{reads}_{side}_val_{side}.fq.gz", reads = paired.keys(), side = 1),
+        right = expand("analysis/rnaseq/trimmed/paired/{reads}_{side}_val_{side}.fq.gz", reads = paired.keys(), side = 2)
+    output:
+        "analysis/star/paired.Aligned.sortedByCoord.out.bam"
+    params:
+        prefix = "analysis/star/paired",
+        left = lambda w, input: ','.join(input.left),
+        right = lambda w, input: ','.join(input.right),
+        groups = lambda w: ' , '.join([ "ID:" + x for x in paired.values() ])
+    conda:
+        "envs/star.yaml"
+    threads:
+        workflow.cores
+    shell:
+        "STAR --runThreadN {threads} --genomeDir {input.index} --readFilesCommand zcat --readFilesIn {params.left} {params.right} --outSAMattrRGline {params.groups} --outFileNamePrefix {params.prefix}. --outSAMtype BAM SortedByCoordinate"
+
+rule trim_paired:
+    input:
+        "rnaseq/paired/{reads}_1.fq.gz",
+        "rnaseq/paired/{reads}_2.fq.gz"
+    output:
+        "analysis/rnaseq/trimmed/paired/{reads}_1_val_1.fq.gz",
+        "analysis/rnaseq/trimmed/paired/{reads}_2_val_2.fq.gz"
+    params:
+        dirname = "analysis/rnaseq/trimmed/paired"
+    conda:
+        "envs/trim_galore.yaml"
+    shell:
+        "trim_galore --paired {input} -o {params.dirname}"
+
+rule trim_single:
+    input:
+        "rnaseq/single/{reads}_R1_001.fastq.gz"
+    output:
+        "analysis/rnaseq/trimmed/single/{reads}_R1_001_trimmed.fq.gz"
+    params:
+        dirname = "analysis/rnaseq/trimmed/single"
+    shell:
+        "trim_galore {input} -o {params.dirname}"
+
+rule cat_homologs:
+    input:
+        expand("analysis/homologs/{dataset}", dataset = datasets)
+    output:
+        "analysis/homologs.faa"
+    conda:
+        "envs/tools.yaml"
+    shell:
+        "find {input} -name '*.faa' | parallel seqkit sort -rl {{}} \| seqkit head -n1 > {output}"
+
