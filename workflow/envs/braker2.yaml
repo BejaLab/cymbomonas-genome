@@ -1,4 +1,14 @@
 channels:
  - bioconda
+ - conda-forge
 dependencies:
+ - perl-list-util
+ - perl-file-which=1.20
+ - zlib=1.2.13
+ - spaln=2.3.3
+ - diamond=2.1.6
+ - biopython
+ - augustus=3.5.0
+ - htslib=1.16
+ - libdeflate=1.13
  - braker2=2.1.6

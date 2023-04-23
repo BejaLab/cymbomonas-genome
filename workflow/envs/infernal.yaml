@@ -1,5 +1,4 @@
 channels:
- - conda-forge
  - bioconda
 dependencies:
- - diamond=2.1.6
+ - infernal=1.1.4

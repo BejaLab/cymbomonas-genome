@@ -1,0 +1,28 @@
+channels:
+ - conda-forge
+ - bioconda
+dependencies:
+ - bamtools=2.5.1
+ - samtools=1.7-2
+ # ProtHint 2.6.0
+ - spaln=2.3.3c 
+ - blast=2.2.31
+ - diamond=0.9.24
+ - cdbtools=0.99
+ - perl=5.22.0
+ - perl-app-cpanminus
+ - perl-class-data-inheritable
+ - perl-exception-class
+ - perl-file-homedir
+ - perl-file-spec
+ - perl-file-which
+ - perl-hash-merge
+ - perl-list-util
+ - perl-logger-simple
+ - perl-module-load-conditional
+ - perl-parallel-forkmanager
+ - perl-posix
+ - perl-scalar-util-numeric
+ - perl-test-pod
+ - perl-yaml
+ - biopython

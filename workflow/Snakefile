@@ -11,12 +11,13 @@ def read_groups(glob):
 
 paired = read_groups("rnaseq/paired/{reads}_1.fq.gz")
 single = read_groups("rnaseq/single/{reads}_R1_001.fastq.gz")
+contam ,= glob_wildcards("contamination/{query}.fna")
+vir_clades ,= glob_wildcards("viral_elements/{clade}.gff3")
+species ,= glob_wildcards("databases/uniprot/species/{species}.fasta")
 
 rule all:
     input:
-        "analysis/references/homologs.cdhit",
-        "analysis/star/paired.Aligned.sortedByCoord.out.bam",
-        "analysis/star/single.Aligned.sortedByCoord.out.bam"
+        "analysis/braker/braker.gtf"
 
 rule get_homologs:
     input:
@@ -24,8 +25,7 @@ rule get_homologs:
     output:
         directory("analysis/references/homologs")
     params:
-        min_taxa = 3,
-        ident = 60
+        min_taxa = 3
     shadow:
         "minimal"
     conda:
@@ -33,11 +33,11 @@ rule get_homologs:
     threads:
         40
     shell:
-        "get_homologues.pl -M -t {params.min_taxa} -d {input} -n {threads} -X -S {params.ident} && mv {input}_homologues {output}"
+        "get_homologues.pl -M -t {params.min_taxa} -d {input} -n {threads} -X && mv {input}_homologues {output}"
 
 rule star_index:
     input:
-        "assembly/genome.fasta"
+        "analysis/assembly/genome.fa"
     output:
         directory("analysis/star/genome")
     conda:
@@ -58,7 +58,7 @@ rule star_map_single:
     conda:
         "envs/star.yaml"
     threads:
-        workflow.cores
+        20
     shell:
         "STAR --runThreadN {threads} --genomeDir {input.index} --readFilesCommand zcat --readFilesIn {params.reads} --outSAMattrRGline {params.groups} --outFileNamePrefix {params.prefix}. --outSAMtype BAM SortedByCoordinate"
 
@@ -77,7 +77,7 @@ rule star_map_paired:
     conda:
         "envs/star.yaml"
     threads:
-        workflow.cores
+        20
     shell:
         "STAR --runThreadN {threads} --genomeDir {input.index} --readFilesCommand zcat --readFilesIn {params.left} {params.right} --outSAMattrRGline {params.groups} --outFileNamePrefix {params.prefix}. --outSAMtype BAM SortedByCoordinate"
 
@@ -130,9 +130,11 @@ rule cdhit_homologs:
 rule bastx_homologs:
     input:
         homologs = "analysis/references/homologs.cdhit",
-        assembly = "assembly/genome.fasta"
+        assembly = "analysis/assembly/genome.fa"
     output:
-        "analysis/references/homologs.outfmt6"
+        "analysis/references/homologs.blast6"
+    log:
+        "analysis/references/homologs.log"
     params:
         evalue = 1e-10
     conda:
@@ -140,56 +142,218 @@ rule bastx_homologs:
     threads:
         20
     shell:
-        "diamond blastx -k 100000 --max-hsps 100000 --query {input.assembly} --db {input.homologs} --outfmt 6 --out {output} --threads {threads} --evalue {params.evalue}"
+        "diamond blastx -k 100000 --max-hsps 100000 --query {input.assembly} --db {input.homologs} --outfmt 6 --out {output} --threads {threads} --evalue {params.evalue} &> {log}"
+
+rule link_genome:
+    input:
+        "assembly"
+    output:
+        "analysis/assembly/genome.fa"
+    shell:
+        "ln -rs {input}/* {output}"
 
 rule red:
     input:
-        "assembly/genome.fasta"
+        "analysis/assembly/genome.fa"
     output:
-        tbl = directory("analysis/red/tbl"),
-        sco = directory("analysis/red/sco"),
-        cnd = directory("analysis/red/cnd"),
-        rpt = directory("analysis/red/rpt"),
-        msk = directory("analysis/red/msk"),
+        sco = "analysis/red/sco/genome.scr",
+        cnd = "analysis/red/cnd/genome.cnd",
+        rpt = "analysis/red/rpt/genome.bed",
+        msk = "analysis/red/msk/genome.msk",
+        tbl = "analysis/red/red.tbl",
         hmm = "analysis/red/red.hmm"
     params:
-        dirname = "analysis/red"
-    shadow:
-        "minimal"
+        genome = "analysis/assembly",
+        scodir = "analysis/red/sco",
+        cnddir = "analysis/red/cnd",
+        rptdir = "analysis/red/rpt",
+        mskdir = "analysis/red/msk"
     conda:
         "envs/red.yaml"
     shell:
         """
-        mkdir -p {output.tbl} {output.sco} {output.cnd} {output.rpt} {output.msk}
-        ln -s {input} genome.fa
-        Red -gnm . -tbl {output.tbl} -sco {output.sco} -cnd {output.cnd} -rpt {output.rpt} -msk {output.msk} -frm 2 -hmo {output.hmm}
+        mkdir -p {params.scodir} {params.cnddir} {params.rptdir} {params.mskdir}
+        Red -gnm {params.genome} -tbl {output.tbl} -hmo {output.hmm} -sco {params.scodir} -cnd {params.cnddir} -rpt {params.rptdir} -msk {params.mskdir} -frm 2
         """
 
-rule mask:
+rule makeblastdb:
     input:
-        assembly = "assembly/genome.fasta"
-        rpt = "analysis/red/rpt",
-        blastx = "analysis/references/homologs.outfmt6",
-        viruses = "viral_elements"
+        "analysis/assembly/genome.fa"
     output:
-        "analysis/assembly/masked.fasta"
+        "analysis/assembly/genome.fa.ndb"
+    conda:
+        "envs/blast.yaml"
     shell:
-        ""
+        "makeblastdb -in {input} -dbtype nucl"
+
+rule blast_contam:
+    input:
+        db = "analysis/assembly/genome.fa",
+        ndb = "analysis/assembly/genome.fa.ndb",
+        query = "contamination/{query}.fna"
+    output:
+        "analysis/contamination/{query}.blast6"
+    params:
+        evalue = 1e-20
+    conda:
+        "envs/blast.yaml"
+    shell:
+        "blastn -query {input.query} -db {input.db} -evalue {params.evalue} -outfmt 6 -out {output}"
+
+rule bed_contam:
+    input:
+        "analysis/contamination/{query}.blast6"
+    output:
+        "analysis/contamination/{query}.bed"
+    params:
+        min_len = 1000
+    conda:
+        "envs/tools.yaml"
+    shell:
+        "awk '{{s=$9;e=$10}} $9>$10 {{s=$10;e=$9}} $4>{params.min_len} {{print$2,s-1,e}}' OFS=\\\\t {input} > {output}"
+
+rule bed_homologs:
+    input:
+        "analysis/references/homologs.blast6"
+    output:
+        "analysis/references/homologs.bed"
+    conda:
+        "envs/tools.yaml"
+    shell:
+        "awk '{{s=$7;e=$8}} $7>$8 {{s=$8;e=$7}} {{print$1,s,e}}' OFS=\\\\t {input} | bedtools sort | bedtools merge > {output}"
+
+rule mask_bed:
+    input:
+        assembly = "analysis/assembly/genome.fa",
+        red_bed  = "analysis/red/rpt/genome.bed",
+        homologs = "analysis/references/homologs.bed",
+        viruses  = expand("viral_elements/{clade}.gff3", clade = vir_clades),
+        contam   = expand("analysis/contamination/{query}.bed", query = contam)
+    output:
+        "analysis/mask/masked.bed"
+    conda:
+        "envs/tools.yaml"
+    shell:
+        """
+        bedtools merge \
+                -i <(bedtools subtract -a {input.red_bed} -b {input.homologs}) \
+                -i <(cat {input.contam}  | bedtools sort) \
+                -i <(cat {input.viruses} | bedtools sort) \
+        > {output}
+        """
+
+rule mask_fasta:
+    input:
+        fasta = "analysis/assembly/genome.fa",
+        bed = "analysis/mask/masked.bed"
+    output:
+        "analysis/mask/masked.fasta"
+    conda:
+        "envs/tools.yaml"
+    shell:
+        "bedtools maskfasta -soft -fi {input.fasta} -bed {input.bed} -fo {output}"
 
 rule braker:
     input:
-        masked = "analysis/assembly/masked.fasta",
-        mask = "analysis/mask/merged",
-        bam = [ "analysis/star/paired.Aligned.sortedByCoord.out.bam", "analysis/star/single.Aligned.sortedByCoord.out.bam" ],
+        masked = "analysis/mask/masked.fasta",
+        paired = "analysis/star/paired.Aligned.sortedByCoord.out.bam",
+        single = "analysis/star/single.Aligned.sortedByCoord.out.bam",
         homologs = "analysis/references/homologs.cdhit"
     output:
-        ""
+        "analysis/braker/braker.gtf"
     params:
         species = "genome_red_subtract",
+        dirname = "analysis/braker",
         gc_prob = 0.05
-    conda:
-        "envs/braker2.yaml"
+    singularity:
+        "docker://teambraker/braker3"
     threads:
         20
     shell:
-        "braker --genome {input.masked} --species {params.species} --bam {input.bam} --prot_seq {input.homologs} --etpmode --cores {threads} --addUTR on --softmasking --gc_probability {params.gc_prob}"
+        "braker --genome {input.masked} --species {params.species} --bam {input.paired},{input.single} --prot_seq {input.homologs} --workingdir {params.dirname} --etpmode --cores {threads} --addUTR on --softmasking --gc_probability {params.gc_prob}"
+
+rule trna:
+    input:
+        "analysis/assembly/genome.fa"
+    output:
+        tab = "analysis/ncrna/trna.tab",
+        sec = "analysis/ncrna/trna.sec"
+    log:
+        "analysis/ncrna/trna.log"
+    conda:
+        "envs/trnascan.yaml"
+    shell:
+        "tRNAscan-SE -o {output.tab} -f {output.sec} {input} &> {log}"
+
+rule rrna:
+    input:
+        fasta = "analysis/assembly/genome.fa",
+        cm = "databases/Rfam/Rfam.cm",
+        clanin = "databases/Rfam/Rfam.clanin"
+    output:
+        txt = "analysis/ncrna/rrna.txt",
+        tblout = "analysis/ncrna/rrna.tblout"
+    log:
+        "analysis/ncrna/rrna.log"
+    conda:
+        "envs/infernal.yaml"
+    threads:
+        4
+    shell:
+        "cmscan --cpu {threads} --cut_ga --rfam --nohmmonly --clanin {input.clanin} --oskip --fmt 2 -o {output.txt} --tblout {output.tblout} databases/Rfam/Rfam.cm {input.fasta} &> {log}"
+
+# stub
+rule busco:
+    input:
+        "analysis/braker/braker.faa"
+    output:
+        "analysis/species/{taxon}/busco/{name}/run_{lineage}/full_table.tsv",
+        "analysis/species/{taxon}/busco/{name}/short_summary.specific.{lineage}.busco.txt",
+        directory("analysis/species/{taxon}/busco/{name}/logs_{lineage}"),
+        directory("analysis/species/{taxon}/busco/{name}/run_{lineage}/busco_sequences/single_copy_busco_sequences/")
+    params:
+        dir = "analysis/species/{taxon}/busco/{name}"
+    shadow:
+        "minimal"
+    conda:
+        "envs/busco.yaml"
+    threads:
+        10
+    shell:
+        """
+        busco --lineage_dataset {wildcards.lineage} -f -i {input} -o busco -m protein -c {threads}
+        mv busco/logs busco/logs_{wildcards.lineage}
+        rsync -qav busco/ {params.dir}
+        """
+
+rule proteinortho:
+    input:
+        expand("analysis/species/{species}.fasta", species = species)
+    output:
+        "analysis/proteinortho/proteinortho.proteinortho.tsv"
+    shadow:
+        "minimal"
+    params:
+        dir = "analysis/proteinortho",
+        evalue = 1e-5
+    threads:
+        30
+    conda:
+        "envs/proteinortho.yaml"
+    shell:
+        """
+        proteinortho -project=proteinortho -cpus={threads} -e={params.evalue} {input}
+        mv proteinortho.* {params.dir}
+        """
+
+rule rhod_interproscan:
+    input:
+        "analysis/braker/braker.faa"
+    output:
+        "analysis/interproscan/braker.faa.tsv"
+    params:
+        dir = "analysis/interproscan"
+    threads:
+        20
+    shell:
+        "interproscan.sh -i {input} -d {params.dir} -cpu {threads}"

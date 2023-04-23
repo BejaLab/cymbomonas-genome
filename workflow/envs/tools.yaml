@@ -4,3 +4,6 @@ channels:
 dependencies:
  - parallel=20230322
  - seqkit=2.4.0
+ - bedtools=2.30.0
+ - biopython=1.81
+ - gawk=5.1.0
