@@ -7,3 +7,6 @@ dependencies:
  - bedtools=2.30.0
  - biopython=1.81
  - gawk=5.1.0
+ - mgkit=0.5.8
+ - jq=1.6
+ - csvkit=1.1.1

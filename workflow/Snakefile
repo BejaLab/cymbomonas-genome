@@ -14,26 +14,11 @@ single = read_groups("rnaseq/single/{reads}_R1_001.fastq.gz")
 contam ,= glob_wildcards("contamination/{query}.fna")
 vir_clades ,= glob_wildcards("viral_elements/{clade}.gff3")
 species ,= glob_wildcards("databases/uniprot/species/{species}.fasta")
+ref_species ,= glob_wildcards("references/{species}.faa")
 
 rule all:
     input:
         "analysis/braker/braker.gtf"
-
-rule get_homologs:
-    input:
-        "references"
-    output:
-        directory("analysis/references/homologs")
-    params:
-        min_taxa = 3
-    shadow:
-        "minimal"
-    conda:
-        "envs/get_homologs.yaml"
-    threads:
-        40
-    shell:
-        "get_homologues.pl -M -t {params.min_taxa} -d {input} -n {threads} -X && mv {input}_homologues {output}"
 
 rule star_index:
     input:
@@ -105,44 +90,79 @@ rule trim_single:
     shell:
         "trim_galore {input} -o {params.dirname}"
 
-rule cat_homologs:
+rule miniprot_index:
     input:
-        "analysis/references/homologs"
+        "analysis/assembly/genome.fa"
     output:
-        "analysis/references/homologs.faa"
+        "analysis/assembly/genome.fa.mpi"
+    conda:
+        "envs/miniprot.yaml"
+    threads:
+        10
+    shell:
+        "miniprot -t{threads} -d {output} {input}"
+
+rule miniprot:
+    input:
+        db = "analysis/assembly/genome.fa.mpi",
+        query = "references/{species}.faa"
+    output:
+        "analysis/miniprot/references/{species}.gff"
+    log:
+        "analysis/miniprot/references/{species}.gff.log"
+    conda:
+        "envs/miniprot.yaml"
+    threads:
+        5
+    shell:
+        "miniprot -t{threads} --gff {input.db} {input.query} > {output} 2> {log}"
+
+rule miniprot_mrna:
+    input:
+        expand("analysis/miniprot/references/{species}.gff", species = ref_species)
+    output:
+        "analysis/miniprot/references-mrna.gff"
+    params:
+        ident = 0.5
     conda:
         "envs/tools.yaml"
     shell:
-        "find {input} -name '*.faa' | xargs cat > {output}"
+        "cat {input} | filter-gff values --str-eq feat_type:mRNA --num-ge Identity:{params.ident} > {output}"
 
-rule cdhit_homologs:
+rule miniprot_mapped:
     input:
-        "analysis/references/homologs.faa"
+        gff = "analysis/miniprot/references-mrna.gff",
+        query = expand("references/{species}.faa", species = ref_species)
     output:
-        "analysis/references/homologs.cdhit"
+        "analysis/miniprot/references.faa"
+    conda:
+        "envs/tools.yaml"
+    shell:
+        "get-gff-info mongodb {input.gff} | jq -r .Target | cut -f1 -d' ' | uniq | seqkit grep -f- -o {output} {input.query}"
+
+rule miniprot_cdhit:
+    input:
+        "analysis/miniprot/references.faa"
+    output:
+        "analysis/miniprot/references.cdhit"
+    log:
+        "analysis/miniprot/references.cdhit.log"
     params:
         c = 0.9
     conda:
         "envs/tools.yaml"
     shell:
-        "cdhit -i {input} -o {output} -c {params.c} -d 0"
+        "cdhit -d 0 -c {params.c} -i {input} -o {output} 2> {log}"
 
-rule bastx_homologs:
+rule miniprot_bed:
     input:
-        homologs = "analysis/references/homologs.cdhit",
-        assembly = "analysis/assembly/genome.fa"
+        "analysis/miniprot/references-mrna.gff"
     output:
-        "analysis/references/homologs.blast6"
-    log:
-        "analysis/references/homologs.log"
-    params:
-        evalue = 1e-10
+        "analysis/miniprot/references-mrna.gff.bed"
     conda:
-        "envs/diamond.yaml"
-    threads:
-        20
+        "envs/tools.yaml"
     shell:
-        "diamond blastx -k 100000 --max-hsps 100000 --query {input.assembly} --db {input.homologs} --outfmt 6 --out {output} --threads {threads} --evalue {params.evalue} &> {log}"
+        "bedtools sort -i {input} | bedtools merge > {output}"
 
 rule link_genome:
     input:
@@ -204,31 +224,19 @@ rule bed_contam:
     input:
         "analysis/contamination/{query}.blast6"
     output:
-        "analysis/contamination/{query}.bed"
-    params:
-        min_len = 1000
+        "analysis/contamination/{query}.blast6.gff"
     conda:
         "envs/tools.yaml"
     shell:
-        "awk '{{s=$9;e=$10}} $9>$10 {{s=$10;e=$9}} $4>{params.min_len} {{print$2,s-1,e}}' OFS=\\\\t {input} > {output}"
-
-rule bed_homologs:
-    input:
-        "analysis/references/homologs.blast6"
-    output:
-        "analysis/references/homologs.bed"
-    conda:
-        "envs/tools.yaml"
-    shell:
-        "awk '{{s=$7;e=$8}} $7>$8 {{s=$8;e=$7}} {{print$1,s,e}}' OFS=\\\\t {input} | bedtools sort | bedtools merge > {output}"
+        "csvcut -t -c2,1,3-6,9,10,7,8,11,12 {input} | csvformat -T | blast2gff blastdb -n > {output}"
 
 rule mask_bed:
     input:
         assembly = "analysis/assembly/genome.fa",
         red_bed  = "analysis/red/rpt/genome.bed",
-        homologs = "analysis/references/homologs.bed",
+        homologs = "analysis/miniprot/references-mrna.gff.bed",
         viruses  = expand("viral_elements/{clade}.gff3", clade = vir_clades),
-        contam   = expand("analysis/contamination/{query}.bed", query = contam)
+        contam   = expand("analysis/contamination/{query}.blast6.gff", query = contam)
     output:
         "analysis/mask/masked.bed"
     conda:
@@ -258,9 +266,11 @@ rule braker:
         masked = "analysis/mask/masked.fasta",
         paired = "analysis/star/paired.Aligned.sortedByCoord.out.bam",
         single = "analysis/star/single.Aligned.sortedByCoord.out.bam",
-        homologs = "analysis/references/homologs.cdhit"
+        homologs = "analysis/references/homologs.gff.faa"
     output:
         "analysis/braker/braker.gtf"
+    log:
+        "analysis/braker/braker.log"
     params:
         species = "genome_red_subtract",
         dirname = "analysis/braker",
@@ -268,9 +278,9 @@ rule braker:
     singularity:
         "docker://teambraker/braker3"
     threads:
-        20
+        10
     shell:
-        "braker --genome {input.masked} --species {params.species} --bam {input.paired},{input.single} --prot_seq {input.homologs} --workingdir {params.dirname} --etpmode --cores {threads} --addUTR on --softmasking --gc_probability {params.gc_prob}"
+        "braker.pl --genome {input.masked} --species {params.species} --bam {input.paired},{input.single} --prot_seq {input.homologs} --workingdir {params.dirname} --threads {threads} --softmasking --gc_probability {params.gc_prob} &> {log}"
 
 rule trna:
     input:
