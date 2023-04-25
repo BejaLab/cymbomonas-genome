@@ -56,8 +56,8 @@ rule pgap:
         8
     shell:
         """
-        rm -r {params.dirname}
-        pgap.py --debug --ignore-all-errors --report-usage-true --cpu {threads} -o {params.dirname} {input.yaml}
+        rm -fr {params.dirname}
+        pgap.py --no-internet --no-self-update --debug --ignore-all-errors --report-usage-true --cpu {threads} -o {params.dirname} {input.yaml}
         """
 
 rule gbf2tbl:

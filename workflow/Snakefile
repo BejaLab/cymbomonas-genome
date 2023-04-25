@@ -16,9 +16,15 @@ vir_clades ,= glob_wildcards("viral_elements/{clade}.gff3")
 species ,= glob_wildcards("databases/uniprot/species/{species}.fasta")
 ref_species ,= glob_wildcards("references/{species}.faa")
 
+eggnog_taxid = 33090
+eggnog_lineage = "Viridiplantae"
+busco_lineage = "chlorophyta_odb10"
+genus_species = "Cymbomonas tetramitiformis"
+strain = "PLY_AMNH"
+
 rule all:
     input:
-        "analysis/braker/braker.gtf"
+        "analysis/funannotate/results"
 
 rule star_index:
     input:
@@ -138,7 +144,7 @@ rule miniprot_mapped:
     conda:
         "envs/tools.yaml"
     shell:
-        "get-gff-info mongodb {input.gff} | jq -r .Target | cut -f1 -d' ' | uniq | seqkit grep -f- -o {output} {input.query}"
+        "get-gff-info mongodb {input.gff} | jq -r .Target | cut -f1 -d' ' | uniq | seqkit grep -f- {input.query} | seqkit seq -i -o {output}"
 
 rule miniprot_cdhit:
     input:
@@ -266,9 +272,10 @@ rule braker:
         masked = "analysis/mask/masked.fasta",
         paired = "analysis/star/paired.Aligned.sortedByCoord.out.bam",
         single = "analysis/star/single.Aligned.sortedByCoord.out.bam",
-        homologs = "analysis/references/homologs.gff.faa"
+        homologs = "analysis/miniprot/references.cdhit"
     output:
-        "analysis/braker/braker.gtf"
+        "analysis/braker/braker.gtf",
+        "analysis/braker/braker.aa"
     log:
         "analysis/braker/braker.log"
     params:
@@ -277,10 +284,23 @@ rule braker:
         gc_prob = 0.05
     singularity:
         "docker://teambraker/braker3"
-    threads:
-        10
     shell:
-        "braker.pl --genome {input.masked} --species {params.species} --bam {input.paired},{input.single} --prot_seq {input.homologs} --workingdir {params.dirname} --threads {threads} --softmasking --gc_probability {params.gc_prob} &> {log}"
+        "braker.pl --genome {input.masked} --species {params.species} --bam {input.paired},{input.single} --prot_seq {input.homologs} --workingdir {params.dirname} --threads 1 --softmasking --gc_probability {params.gc_prob} &> {log}"
+
+rule gtf_to_gff:
+    input:
+        "analysis/braker/braker.gtf"
+    output:
+        "analysis/braker/braker.gff"
+    shadow:
+        "minimal"
+    singularity:
+        "docker://teambraker/braker3"
+    shell:
+        """
+        python fix_gtf_ids.py --gtf {input} --out fixed.gtf
+        gffread fixed.gtf -o {output}
+        """
 
 rule trna:
     input:
@@ -312,17 +332,17 @@ rule rrna:
     shell:
         "cmscan --cpu {threads} --cut_ga --rfam --nohmmonly --clanin {input.clanin} --oskip --fmt 2 -o {output.txt} --tblout {output.tblout} databases/Rfam/Rfam.cm {input.fasta} &> {log}"
 
-# stub
+# NB: not used
 rule busco:
     input:
-        "analysis/braker/braker.faa"
+        "analysis/braker/braker.aa"
     output:
-        "analysis/species/{taxon}/busco/{name}/run_{lineage}/full_table.tsv",
-        "analysis/species/{taxon}/busco/{name}/short_summary.specific.{lineage}.busco.txt",
-        directory("analysis/species/{taxon}/busco/{name}/logs_{lineage}"),
-        directory("analysis/species/{taxon}/busco/{name}/run_{lineage}/busco_sequences/single_copy_busco_sequences/")
+        "analysis/busco/run_{lineage}/full_table.tsv",
+        "analysis/busco/short_summary.specific.{lineage}.busco.txt",
+        directory("analysis/busco/logs_{lineage}"),
+        directory("analysis/busco/run_{lineage}/busco_sequences/single_copy_busco_sequences/")
     params:
-        dir = "analysis/species/{taxon}/busco/{name}"
+        dir = "analysis/busco"
     shadow:
         "minimal"
     conda:
@@ -336,6 +356,7 @@ rule busco:
         rsync -qav busco/ {params.dir}
         """
 
+# NB: not used
 rule proteinortho:
     input:
         expand("analysis/species/{species}.fasta", species = species)
@@ -356,14 +377,80 @@ rule proteinortho:
         mv proteinortho.* {params.dir}
         """
 
-rule rhod_interproscan:
-    input:
-        "analysis/braker/braker.faa"
+rule dload_eggnog:
     output:
-        "analysis/interproscan/braker.faa.tsv"
+        "analysis/eggnog/data/eggnog.db"
+    params:
+        taxid = eggnog_taxid,
+        dbname = eggnog_lineage
+    conda:
+        "envs/eggnog.yaml"
+    shell:
+        "download_eggnog_data.py -y -d {params.taxid} --dbname {params.dbname} --data_dir $(dirname {output})"
+
+rule eggnog:
+    input:
+        db = "analysis/eggnog/data/eggnog.db",
+        faa = "analysis/braker/braker.aa"
+    output:
+        "analysis/eggnog/emapper/eggnog.emapper.annotations"
+    conda:
+        "envs/eggnog.yaml"
+    threads:
+        20
+    shell:
+        "emapper.py --cpu {threads} -o eggnog -i {input.faa} --data_dir $(dirname {input.db}) -m diamond --output_dir $(dirname {output})"
+
+rule interproscan:
+    input:
+        "analysis/braker/braker.aa"
+    output:
+        "analysis/interproscan/braker.aa.xml"
     params:
         dir = "analysis/interproscan"
     threads:
         20
     shell:
         "interproscan.sh -i {input} -d {params.dir} -cpu {threads}"
+
+rule funannotate_setup:
+    output:
+        directory("analysis/funannotate/data")
+    log:
+        "analysis/funannotate/funannotate-setup.log"
+    params:
+        lineage = busco_lineage,
+        host_dir = "https://busco-data.ezlab.org/v5/data/lineages/"
+    shadow:
+        "minimal"
+    conda:
+        "envs/funannotate.yaml"
+    shell:
+        """
+        funannotate setup -w -d {output}
+        mv funannotate-setup.log {log}
+        wget -r -np -nH -e robots=off --cut-dirs=5 -A '{params.lineage}.*.tar.gz' {params.host_dir}
+        tar xfz {params.lineage}.*.tar.gz -C {output}/
+        """
+
+rule funannotate:
+    input:
+        iprscan = "analysis/interproscan/braker.aa.xml",
+        eggnog = "analysis/eggnog/emapper/eggnog.emapper.annotations",
+        data = "analysis/funannotate/data",
+        gff = "analysis/braker/braker.gff",
+        fasta = "analysis/assembly/genome.fa"
+    output:
+        directory("analysis/funannotate/results")
+    log:
+        "analysis/funannotate/funannotate-annotate.log"
+    params:
+        species = genus_species,
+        strain = strain,
+        lineage = busco_lineage
+    conda:
+        "envs/funannotate.yaml"
+    threads:
+        10
+    shell:
+        "funannotate annotate --fasta {input.fasta} --gff {input.gff} -d {input.data} --species {params.species} --strain {params.strain} --busco_db {params.lineage} --eggnog {input.eggnog} --iprscan {input.iprscan} -o {output} --cpus {threads} --rename &> {log}"

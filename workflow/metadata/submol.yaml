@@ -1,4 +1,4 @@
-topology: 'linear'
+topology: 'circular'
 comment: 'There is no really a biologist Arnold Schwarzenegger'
 consortium: 'SkyNet consortium'
 sra:

@@ -2,5 +2,4 @@ channels:
  - conda-forge
  - bioconda
 dependencies:
- - get_homologues=3.5.4
- - diamond=0.8.36
+ - eggnog-mapper=2.1.10
