@@ -45,7 +45,7 @@ rule star_map_single:
     params:
         prefix = "analysis/star/single",
         reads = lambda w, input: ','.join(input.reads),
-        groups = lambda w: ' , '.join([ "ID:" + x for x in single.values() ])
+        groups = lambda w: ' , '.join([ "ID:%s SM:%s" % (ID, SM) for ID, SM in single.items() ])
     conda:
         "envs/star.yaml"
     threads:
@@ -64,7 +64,7 @@ rule star_map_paired:
         prefix = "analysis/star/paired",
         left = lambda w, input: ','.join(input.left),
         right = lambda w, input: ','.join(input.right),
-        groups = lambda w: ' , '.join([ "ID:" + x for x in paired.values() ])
+        groups = lambda w: ' , '.join([ "ID:%s SM:%s" % (ID, SM) for ID, SM in paired.items() ])
     conda:
         "envs/star.yaml"
     threads:
@@ -274,18 +274,19 @@ rule braker:
         single = "analysis/star/single.Aligned.sortedByCoord.out.bam",
         homologs = "analysis/miniprot/references.cdhit"
     output:
-        "analysis/braker/braker.gtf",
-        "analysis/braker/braker.aa"
+        gtf = "analysis/braker/braker.gtf",
+        faa = "analysis/braker/braker.aa",
+        dirname = directory("analysis/braker")
     log:
         "analysis/braker/braker.log"
     params:
-        species = "genome_red_subtract",
-        dirname = "analysis/braker",
-        gc_prob = 0.05
+        gc_prob = 0.01
+    shadow:
+        "minimal"
     singularity:
         "docker://teambraker/braker3"
     shell:
-        "braker.pl --genome {input.masked} --species {params.species} --bam {input.paired},{input.single} --prot_seq {input.homologs} --workingdir {params.dirname} --threads 1 --softmasking --gc_probability {params.gc_prob} &> {log}"
+        "braker.pl --genome {input.masked} --species $(date +%s) --bam {input.paired},{input.single} --prot_seq {input.homologs} --workingdir {output.dirname} --threads 1 --softmasking --gc_probability {params.gc_prob} &> {log}"
 
 rule gtf_to_gff:
     input:
@@ -298,7 +299,7 @@ rule gtf_to_gff:
         "docker://teambraker/braker3"
     shell:
         """
-        python fix_gtf_ids.py --gtf {input} --out fixed.gtf
+        fix_gtf_ids.py --gtf {input} --out fixed.gtf
         gffread fixed.gtf -o {output}
         """
 
