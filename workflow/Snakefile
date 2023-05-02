@@ -15,7 +15,6 @@ contam ,= glob_wildcards("contamination/{query}.fna")
 vir_clades ,= glob_wildcards("viral_elements/{clade}.gff3")
 species ,= glob_wildcards("databases/uniprot/species/{species}.fasta")
 ref_species ,= glob_wildcards("references/{species}.faa")
-
 eggnog_taxid = 33090
 eggnog_lineage = "Viridiplantae"
 busco_lineage = "chlorophyta_odb10"
@@ -26,6 +25,16 @@ rule all:
     input:
         "analysis/funannotate/results"
 
+rule hisat_index:
+    input:
+        "analysis/assembly/genome.fa"
+    output:
+        "analysis/assembly/genome.fa.1.ht2"
+    conda:
+        "envs/hisat2.yaml"
+    shell:
+        "hisat2-build {input} {input}"
+
 rule star_index:
     input:
         "analysis/assembly/genome.fa"
@@ -35,6 +44,39 @@ rule star_index:
         "envs/star.yaml"
     shell:
         "STAR --genomeSAindexNbases 10 --runMode genomeGenerate --genomeFastaFiles {input} --genomeDir {output}"
+
+rule hisat_map_single:
+    input:
+        genome = "analysis/assembly/genome.fa",
+        index = "analysis/assembly/genome.fa.1.ht2",
+        reads = "analysis/rnaseq/trimmed/single/{reads}_R1_001_trimmed.fq.gz"
+    output:
+        "analysis/hisat/single/{reads}.bam"
+    params:
+        sample = lambda w: single[w.reads]
+    conda:
+        "envs/hisat2.yaml"
+    threads:
+        10
+    shell:
+        "hisat2 -x {input.genome} -U {input.reads} --dta --rg-id {wildcards.reads} --rg SM:{params.sample} --rg LB:{params.sample} --rg PL:ILLUMINA -p {threads} | samtools view -bh -F 4 | samtools sort --threads {threads} > {output}"
+
+rule hisat_map_paired:
+    input:
+        genome = "analysis/assembly/genome.fa",
+        index = "analysis/assembly/genome.fa.1.ht2",
+        left  = "analysis/rnaseq/trimmed/paired/{reads}_1_val_1.fq.gz",
+        right = "analysis/rnaseq/trimmed/paired/{reads}_2_val_2.fq.gz"
+    output:
+        "analysis/hisat/paired/{reads}.bam"
+    params:
+        sample = lambda w: paired[w.reads]
+    conda:
+        "envs/hisat2.yaml"
+    threads:
+        10
+    shell:
+        "hisat2 -x {input.genome} -1 {input.left} -2 {input.right} --dta --rg-id {wildcards.reads} --rg SM:{params.sample} --rg LB:{params.sample} --rg PL:ILLUMINA -p {threads} | samtools view -bh -F 4 | samtools sort --threads {threads} > {output}"
 
 rule star_map_single:
     input:
@@ -51,7 +93,7 @@ rule star_map_single:
     threads:
         20
     shell:
-        "STAR --runThreadN {threads} --genomeDir {input.index} --readFilesCommand zcat --readFilesIn {params.reads} --outSAMattrRGline {params.groups} --outFileNamePrefix {params.prefix}. --outSAMtype BAM SortedByCoordinate"
+        "STAR --runThreadN {threads} --outSAMstrandField intronMotif --genomeDir {input.index} --readFilesCommand zcat --readFilesIn {params.reads} --outSAMattrRGline {params.groups} --outFileNamePrefix {params.prefix}. --outSAMtype BAM SortedByCoordinate"
 
 rule star_map_paired:
     input:
@@ -70,7 +112,7 @@ rule star_map_paired:
     threads:
         20
     shell:
-        "STAR --runThreadN {threads} --genomeDir {input.index} --readFilesCommand zcat --readFilesIn {params.left} {params.right} --outSAMattrRGline {params.groups} --outFileNamePrefix {params.prefix}. --outSAMtype BAM SortedByCoordinate"
+        "STAR --runThreadN {threads} --outSAMstrandField intronMotif --genomeDir {input.index} --readFilesCommand zcat --readFilesIn {params.left} {params.right} --outSAMattrRGline {params.groups} --outFileNamePrefix {params.prefix}. --outSAMtype BAM SortedByCoordinate"
 
 rule trim_paired:
     input:
@@ -144,7 +186,7 @@ rule miniprot_mapped:
     conda:
         "envs/tools.yaml"
     shell:
-        "get-gff-info mongodb {input.gff} | jq -r .Target | cut -f1 -d' ' | uniq | seqkit grep -f- {input.query} | seqkit seq -i -o {output}"
+        "get-gff-info mongodb {input.gff} | jq -r .Target | cut -f1 -d' ' | uniq | seqkit grep -f- {input.query} | seqkit replace -p '[*]' | seqkit seq -i -o {output}"
 
 rule miniprot_cdhit:
     input:
@@ -270,23 +312,23 @@ rule mask_fasta:
 rule braker:
     input:
         masked = "analysis/mask/masked.fasta",
-        paired = "analysis/star/paired.Aligned.sortedByCoord.out.bam",
-        single = "analysis/star/single.Aligned.sortedByCoord.out.bam",
+        paired = expand("analysis/hisat/paired/{reads}.bam", reads = paired.keys()),
+        single = expand("analysis/hisat/single/{reads}.bam", reads = single.keys()),
         homologs = "analysis/miniprot/references.cdhit"
     output:
         gtf = "analysis/braker/braker.gtf",
         faa = "analysis/braker/braker.aa",
         dirname = directory("analysis/braker")
     log:
-        "analysis/braker/braker.log"
+        "analysis/braker.log"
     params:
-        gc_prob = 0.01
-    shadow:
-        "minimal"
+        gc_prob = 0.01,
+        paired = lambda w, input: ','.join(input.paired),
+        single = lambda w, input: ','.join(input.single)
     singularity:
         "docker://teambraker/braker3"
     shell:
-        "braker.pl --genome {input.masked} --species $(date +%s) --bam {input.paired},{input.single} --prot_seq {input.homologs} --workingdir {output.dirname} --threads 1 --softmasking --gc_probability {params.gc_prob} &> {log}"
+        "braker.pl --genome {input.masked} --species $(date +%s) --bam {params.paired},{params.single} --prot_seq {input.homologs} --workingdir {output.dirname} --threads 1 --softmasking --gc_probability {params.gc_prob} &> {log}"
 
 rule gtf_to_gff:
     input:
@@ -302,6 +344,16 @@ rule gtf_to_gff:
         fix_gtf_ids.py --gtf {input} --out fixed.gtf
         gffread fixed.gtf -o {output}
         """
+
+rule rem_asterisks:
+    input:
+        "analysis/braker/braker.aa"
+    output:
+        "analysis/braker/braker.faa"
+    conda:
+        "ens/tools.yaml"
+    shell:
+        "seqkit replace -sp '[*]' -o {output} {input}"
 
 rule trna:
     input:
@@ -392,7 +444,7 @@ rule dload_eggnog:
 rule eggnog:
     input:
         db = "analysis/eggnog/data/eggnog.db",
-        faa = "analysis/braker/braker.aa"
+        faa = "analysis/braker/braker.faa"
     output:
         "analysis/eggnog/emapper/eggnog.emapper.annotations"
     conda:
@@ -404,9 +456,9 @@ rule eggnog:
 
 rule interproscan:
     input:
-        "analysis/braker/braker.aa"
+        "analysis/braker/braker.faa"
     output:
-        "analysis/interproscan/braker.aa.xml"
+        "analysis/interproscan/braker.faa.xml"
     params:
         dir = "analysis/interproscan"
     threads:
@@ -436,7 +488,7 @@ rule funannotate_setup:
 
 rule funannotate:
     input:
-        iprscan = "analysis/interproscan/braker.aa.xml",
+        iprscan = "analysis/interproscan/braker.faa.xml",
         eggnog = "analysis/eggnog/emapper/eggnog.emapper.annotations",
         data = "analysis/funannotate/data",
         gff = "analysis/braker/braker.gff",
