@@ -309,6 +309,7 @@ rule mask_fasta:
     shell:
         "bedtools maskfasta -soft -fi {input.fasta} -bed {input.bed} -fo {output}"
 
+# not used
 rule braker:
     input:
         masked = "analysis/mask/masked.fasta",
@@ -316,11 +317,11 @@ rule braker:
         single = expand("analysis/hisat/single/{reads}.bam", reads = single.keys()),
         homologs = "analysis/miniprot/references.cdhit"
     output:
-        gtf = "analysis/braker/braker.gtf",
-        faa = "analysis/braker/braker.aa",
-        dirname = directory("analysis/braker")
+        gtf = "analysis/braker3/braker.gtf",
+        faa = "analysis/braker3/braker.aa",
+        dirname = directory("analysis/braker3")
     log:
-        "analysis/braker.log"
+        "analysis/braker3.log"
     params:
         gc_prob = 0.01,
         paired = lambda w, input: ','.join(input.paired),
@@ -330,30 +331,39 @@ rule braker:
     shell:
         "braker.pl --genome {input.masked} --species $(date +%s) --bam {params.paired},{params.single} --prot_seq {input.homologs} --workingdir {output.dirname} --threads 1 --softmasking --gc_probability {params.gc_prob} &> {log}"
 
-rule gtf_to_gff:
+rule braker_legacy:
     input:
+        masked = "analysis/mask/masked.fasta",
+        paired = expand("analysis/hisat/paired/{reads}.bam", reads = paired.keys()),
+        single = expand("analysis/hisat/single/{reads}.bam", reads = single.keys()),
+        homologs = "analysis/miniprot/references.cdhit"
+    output:
         "analysis/braker/braker.gtf"
-    output:
-        "analysis/braker/braker.gff"
-    shadow:
-        "minimal"
-    singularity:
-        "docker://teambraker/braker3"
+    log:
+        "analysis/braker.log"
+    params:
+        gc_prob = 0.01,
+        paired = lambda w, input: ','.join(input.paired),
+        single = lambda w, input: ','.join(input.single)
+    threads:
+        10
     shell:
-        """
-        fix_gtf_ids.py --gtf {input} --out fixed.gtf
-        gffread fixed.gtf -o {output}
-        """
+        "braker --etpmode --genome {input.masked} --species $(date +%s) --bam {params.paired},{params.single} --prot_seq {input.homologs} --workingdir $(dirname {output}) --threads {threads} --softmasking --gc_probability {params.gc_prob} &> {log}"
 
-rule rem_asterisks:
+
+rule braker_parse:
     input:
-        "analysis/braker/braker.aa"
+        gtf = "analysis/braker/braker.gtf",
+        fna = "analysis/assembly/genome.fa"
     output:
-        "analysis/braker/braker.faa"
+        gff = "analysis/braker/braker.gff",
+        faa = "analysis/braker/braker.faa"
+    log:
+        "analysis/braker_parse.log"
     conda:
-        "ens/tools.yaml"
+        "envs/gff.yaml"
     shell:
-        "seqkit replace -sp '[*]' -o {output} {input}"
+        "(gffread {input.gtf} | awk '$3!~/CDS/' | gt gff3 -sort | gt cds -matchdescstart -seqfile {input.fna} | gffread -o {output.gff} -Sy {output.faa} -g {input.fna}) 2> {log}"
 
 rule trna:
     input:
@@ -388,7 +398,7 @@ rule rrna:
 # NB: not used
 rule busco:
     input:
-        "analysis/braker/braker.aa"
+        "analysis/braker/braker.faa"
     output:
         "analysis/busco/run_{lineage}/full_table.tsv",
         "analysis/busco/short_summary.specific.{lineage}.busco.txt",
@@ -464,7 +474,7 @@ rule interproscan:
     threads:
         20
     shell:
-        "interproscan.sh -i {input} -d {params.dir} -cpu {threads}"
+        "interproscan.sh --disable-precalc -i {input} -d {params.dir} -cpu {threads}"
 
 rule funannotate_setup:
     output:

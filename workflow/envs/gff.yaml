@@ -1,0 +1,6 @@
+channels:
+ - conda-forge
+ - bioconda
+dependencies:
+ - genometools-genometools=1.6.2
+ - gffread=0.12.7
