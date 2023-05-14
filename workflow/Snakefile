@@ -23,7 +23,7 @@ strain = "PLY_AMNH"
 
 rule all:
     input:
-        "analysis/funannotate/results"
+        "analysis/funannotate/results/annotate_results"
 
 rule hisat_index:
     input:
@@ -354,7 +354,8 @@ rule braker_legacy:
 rule braker_parse:
     input:
         gtf = "analysis/braker/braker.gtf",
-        fna = "analysis/assembly/genome.fa"
+        fna = "analysis/assembly/genome.fa",
+        fix_gff = "workflow/tools/fix_gff.py"
     output:
         gff = "analysis/braker/braker.gff",
         faa = "analysis/braker/braker.faa"
@@ -362,8 +363,24 @@ rule braker_parse:
         "analysis/braker_parse.log"
     conda:
         "envs/gff.yaml"
+    shadow:
+        "minimal"
     shell:
-        "(gffread {input.gtf} | awk '$3!~/CDS/' | gt gff3 -sort | gt cds -matchdescstart -seqfile {input.fna} | gffread -o {output.gff} -Sy {output.faa} -g {input.fna}) 2> {log}"
+        """
+        (gffread {input.gtf} | awk '$3!~/CDS/' | gt gff3 -sort | gt cds -matchdescstart -seqfile {input.fna} | gffread --keep-genes | python {input.fix_gff} > tmp.gff) 2> {log}
+        gfftk convert -f {input.fna} -i tmp.gff --input-format gff3 --output-format proteins -o {output.faa}
+        gfftk sanitize -f {input.fna} -g tmp.gff -o {output.gff}
+        """
+
+rule rem_stops:
+    input:
+        "analysis/braker/braker.faa"
+    output:
+        "analysis/braker/braker_nostop.faa"
+    conda:
+        "envs/tools.yaml"
+    shell:
+        "seqkit replace -sp '[*]$' -o {output} {input}"
 
 rule trna:
     input:
@@ -377,6 +394,16 @@ rule trna:
         "envs/trnascan.yaml"
     shell:
         "tRNAscan-SE -o {output.tab} -f {output.sec} {input} &> {log}"
+
+rule trna_to_gff:
+    input:
+        "analysis/ncrna/trna.tab"
+    output:
+        "analysis/ncrna/trna.gff"
+    conda:
+        "envs/perl.yaml"
+    shell:
+        "perl workflow/tools/convert_tRNAScanSE_to_gff3.pl --input {input} > {output}"
 
 rule rrna:
     input:
@@ -394,6 +421,16 @@ rule rrna:
         4
     shell:
         "cmscan --cpu {threads} --cut_ga --rfam --nohmmonly --clanin {input.clanin} --oskip --fmt 2 -o {output.txt} --tblout {output.tblout} databases/Rfam/Rfam.cm {input.fasta} &> {log}"
+
+rule rrna_to_gff:
+    input:
+        "analysis/ncrna/rrna.tblout"
+    output:
+        "analysis/ncrna/rrna.gff"
+    conda:
+        "envs/perl.yaml"
+    shell:
+        "perl workflow/tools/infernal-tblout2gff.pl --fmt2 --cmscan {input} > {output}"
 
 # NB: not used
 rule busco:
@@ -454,7 +491,7 @@ rule dload_eggnog:
 rule eggnog:
     input:
         db = "analysis/eggnog/data/eggnog.db",
-        faa = "analysis/braker/braker.faa"
+        faa = "analysis/braker/braker_nostop.faa"
     output:
         "analysis/eggnog/emapper/eggnog.emapper.annotations"
     conda:
@@ -466,7 +503,7 @@ rule eggnog:
 
 rule interproscan:
     input:
-        "analysis/braker/braker.faa"
+        "analysis/braker/braker_nostop.faa"
     output:
         "analysis/interproscan/braker.faa.xml"
     params:
@@ -481,30 +518,49 @@ rule funannotate_setup:
         directory("analysis/funannotate/data")
     log:
         "analysis/funannotate/funannotate-setup.log"
-    params:
-        lineage = busco_lineage,
-        host_dir = "https://busco-data.ezlab.org/v5/data/lineages/"
     shadow:
         "minimal"
     conda:
         "envs/funannotate.yaml"
     shell:
         """
-        funannotate setup -w -d {output}
+        funannotate setup -w -d {output} --busco_db eukaryota
         mv funannotate-setup.log {log}
         wget -r -np -nH -e robots=off --cut-dirs=5 -A '{params.lineage}.*.tar.gz' {params.host_dir}
         tar xfz {params.lineage}.*.tar.gz -C {output}/
+        """
+
+rule funannotate_busco:
+    input:
+        data = "analysis/funannotate/data",
+        faa = "analysis/braker/braker_nostop.faa"
+    output:
+        directory("analysis/funannotate/results/annotate_misc/run_busco")
+    params:
+        host_dir = "https://busco-data.ezlab.org/v5/data/lineages/",
+        lineage = busco_lineage
+    shadow:
+        "minimal"
+    conda:
+        "envs/funannotate.yaml"
+    threads:
+        10
+    shell:
+        """
+        $CONDA_PREFIX/lib/python*/site-packages/funannotate/aux_scripts/funannotate-BUSCO2.py -i {input.faa} -m proteins -l {input.data}/{params.lineage} -o busco -c {threads} -f
+        mv run_busco {output}
         """
 
 rule funannotate:
     input:
         iprscan = "analysis/interproscan/braker.faa.xml",
         eggnog = "analysis/eggnog/emapper/eggnog.emapper.annotations",
+        busco = "analysis/funannotate/results/annotate_misc/run_busco",
         data = "analysis/funannotate/data",
         gff = "analysis/braker/braker.gff",
         fasta = "analysis/assembly/genome.fa"
     output:
-        directory("analysis/funannotate/results")
+        directory("analysis/funannotate/results/annotate_results")
     log:
         "analysis/funannotate/funannotate-annotate.log"
     params:
@@ -516,4 +572,8 @@ rule funannotate:
     threads:
         10
     shell:
-        "funannotate annotate --fasta {input.fasta} --gff {input.gff} -d {input.data} --species {params.species} --strain {params.strain} --busco_db {params.lineage} --eggnog {input.eggnog} --iprscan {input.iprscan} -o {output} --cpus {threads} --rename &> {log}"
+        """
+        FUNANNOTATE_DB={input.data} funannotate annotate -o $(dirname {output}) --cpus {threads} --rename 1 \
+            --species '{params.species}' --strain '{params.strain}' --busco_db {params.lineage} \
+            --fasta {input.fasta} --gff {input.gff} -d {input.data} --eggnog {input.eggnog} --iprscan {input.iprscan} &> {log}
+        """
