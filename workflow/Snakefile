@@ -11,19 +11,20 @@ def read_groups(glob):
 
 paired = read_groups("rnaseq/paired/{reads}_1.fq.gz")
 single = read_groups("rnaseq/single/{reads}_R1_001.fastq.gz")
-contam ,= glob_wildcards("contamination/{query}.fna")
+major_contam ,= glob_wildcards("contamination/major/{query}.fna")
+minor_contam ,= glob_wildcards("contamination/minor/{query}.fna")
 vir_clades ,= glob_wildcards("viral_elements/{clade}.gff3")
 species ,= glob_wildcards("databases/uniprot/species/{species}.fasta")
 ref_species ,= glob_wildcards("references/{species}.faa")
-eggnog_taxid = 33090
-eggnog_lineage = "Viridiplantae"
+
+lineage = "Viridiplantae"
 busco_lineage = "chlorophyta_odb10"
 genus_species = "Cymbomonas tetramitiformis"
 strain = "PLY_AMNH"
 
 rule all:
     input:
-        "analysis/funannotate/results/annotate_results"
+        "output/submission/annot.sqn"
 
 rule hisat_index:
     input:
@@ -278,13 +279,24 @@ rule bed_contam:
     shell:
         "csvcut -t -c2,1,3-6,9,10,7,8,11,12 {input} | csvformat -T | blast2gff blastdb -n > {output}"
 
+rule bed_contam_merge:
+    input:
+        major = expand("analysis/contamination/major/{query}.blast6.gff", query = major_contam),
+        minor = expand("analysis/contamination/minor/{query}.blast6.gff", query = minor_contam)
+    output:
+        "analysis/contamination/all.bed"
+    conda:
+        "envs/tools.yaml"
+    shell:
+        "cat {input} | bedtools sort | bedtools merge > {output}"
+
 rule mask_bed:
     input:
         assembly = "analysis/assembly/genome.fa",
         red_bed  = "analysis/red/rpt/genome.bed",
         homologs = "analysis/miniprot/references-mrna.gff.bed",
         viruses  = expand("viral_elements/{clade}.gff3", clade = vir_clades),
-        contam   = expand("analysis/contamination/{query}.blast6.gff", query = contam)
+        contam   = expand("analysis/contamination/major/{query}.blast6.gff", query = major_contam)
     output:
         "analysis/mask/masked.bed"
     conda:
@@ -350,15 +362,13 @@ rule braker_legacy:
     shell:
         "braker --etpmode --genome {input.masked} --species $(date +%s) --bam {params.paired},{params.single} --prot_seq {input.homologs} --workingdir $(dirname {output}) --threads {threads} --softmasking --gc_probability {params.gc_prob} &> {log}"
 
-
-rule braker_parse:
+rule braker_parse_old:
     input:
         gtf = "analysis/braker/braker.gtf",
         fna = "analysis/assembly/genome.fa",
-        fix_gff = "workflow/tools/fix_gff.py"
+        fix_gff = "workflow/lib/fix_gff_old.py"
     output:
-        gff = "analysis/braker/braker.gff",
-        faa = "analysis/braker/braker.faa"
+        "analysis/braker/braker_old.gff",
     log:
         "analysis/braker_parse.log"
     conda:
@@ -368,9 +378,37 @@ rule braker_parse:
     shell:
         """
         (gffread {input.gtf} | awk '$3!~/CDS/' | gt gff3 -sort | gt cds -matchdescstart -seqfile {input.fna} | gffread --keep-genes | python {input.fix_gff} > tmp.gff) 2> {log}
-        gfftk convert -f {input.fna} -i tmp.gff --input-format gff3 --output-format proteins -o {output.faa}
-        gfftk sanitize -f {input.fna} -g tmp.gff -o {output.gff}
+        gfftk sanitize -f {input.fna} -g tmp.gff -o {output}
         """
+
+rule braker_parse:
+    input:
+        gtf = "analysis/braker/braker.gtf",
+        fna = "analysis/assembly/genome.fa"
+    output:
+        "analysis/braker/braker.gff"
+    params:
+        fix_gff = "workflow/lib/fix_gff.py"
+    log:
+        "analysis/braker_parse.log"
+    conda:
+        "envs/gff.yaml"
+    shell:
+        """
+        (gffread {input.gtf} | awk '$3!~/CDS/' | gt gff3 -sort | gt cds -matchdescstart -seqfile {input.fna} | gffread -FMKYQ | python {params.fix_gff} > {output}_unsanitized.gff) 2> {log}
+        gfftk sanitize -f {input.fna} -g {output}_unsanitized.gff -o {output}
+        """
+
+rule gff_to_faa:
+    input:
+        fna = "analysis/assembly/genome.fa",
+        gff = "analysis/braker/braker.gff"
+    output:
+        "analysis/braker/braker.faa"
+    conda:
+        "envs/gff.yaml"
+    shell:
+        "gfftk convert -f {input.fna} -i {input.gff} --input-format gff3 --output-format proteins -o {output}"
 
 rule rem_stops:
     input:
@@ -395,16 +433,6 @@ rule trna:
     shell:
         "tRNAscan-SE -o {output.tab} -f {output.sec} {input} &> {log}"
 
-rule trna_to_gff:
-    input:
-        "analysis/ncrna/trna.tab"
-    output:
-        "analysis/ncrna/trna.gff"
-    conda:
-        "envs/perl.yaml"
-    shell:
-        "perl workflow/tools/convert_tRNAScanSE_to_gff3.pl --input {input} > {output}"
-
 rule rrna:
     input:
         fasta = "analysis/assembly/genome.fa",
@@ -421,16 +449,6 @@ rule rrna:
         4
     shell:
         "cmscan --cpu {threads} --cut_ga --rfam --nohmmonly --clanin {input.clanin} --oskip --fmt 2 -o {output.txt} --tblout {output.tblout} databases/Rfam/Rfam.cm {input.fasta} &> {log}"
-
-rule rrna_to_gff:
-    input:
-        "analysis/ncrna/rrna.tblout"
-    output:
-        "analysis/ncrna/rrna.gff"
-    conda:
-        "envs/perl.yaml"
-    shell:
-        "perl workflow/tools/infernal-tblout2gff.pl --fmt2 --cmscan {input} > {output}"
 
 # NB: not used
 rule busco:
@@ -480,13 +498,10 @@ rule proteinortho:
 rule dload_eggnog:
     output:
         "analysis/eggnog/data/eggnog.db"
-    params:
-        taxid = eggnog_taxid,
-        dbname = eggnog_lineage
     conda:
         "envs/eggnog.yaml"
     shell:
-        "download_eggnog_data.py -y -d {params.taxid} --dbname {params.dbname} --data_dir $(dirname {output})"
+        "download_eggnog_data.py -y -d {params.taxid} --dbname {params.taxon} --data_dir $(dirname {output})"
 
 rule eggnog:
     input:
@@ -494,18 +509,20 @@ rule eggnog:
         faa = "analysis/braker/braker_nostop.faa"
     output:
         "analysis/eggnog/emapper/eggnog.emapper.annotations"
+    params:
+        taxon = lineage
     conda:
         "envs/eggnog.yaml"
     threads:
         20
     shell:
-        "emapper.py --cpu {threads} -o eggnog -i {input.faa} --data_dir $(dirname {input.db}) -m diamond --output_dir $(dirname {output})"
+        "emapper.py --cpu {threads} -o eggnog -i {input.faa} --tax_scope {params.taxon} --data_dir $(dirname {input.db}) -m diamond --output_dir $(dirname {output})"
 
 rule interproscan:
     input:
         "analysis/braker/braker_nostop.faa"
     output:
-        "analysis/interproscan/braker.faa.xml"
+        "analysis/interproscan/braker_nostop.faa.xml"
     params:
         dir = "analysis/interproscan"
     threads:
@@ -515,7 +532,10 @@ rule interproscan:
 
 rule funannotate_setup:
     output:
-        directory("analysis/funannotate/data")
+        info = "analysis/funannotate/data/funannotate-db-info.txt",
+        ncbi = "analysis/funannotate/data/ncbi_cleaned_gene_products.txt.original"
+    params:
+        dirname = "analysis/funannotate/data"
     log:
         "analysis/funannotate/funannotate-setup.log"
     shadow:
@@ -524,21 +544,47 @@ rule funannotate_setup:
         "envs/funannotate.yaml"
     shell:
         """
-        funannotate setup -w -d {output} --busco_db eukaryota
+        funannotate setup -w -d {params.dirname} --busco_db eukaryota
         mv funannotate-setup.log {log}
-        wget -r -np -nH -e robots=off --cut-dirs=5 -A '{params.lineage}.*.tar.gz' {params.host_dir}
-        tar xfz {params.lineage}.*.tar.gz -C {output}/
+        mv {params.dirname}/ncbi_cleaned_gene_products.txt {output.ncbi}
         """
+
+rule braker_makeblast:
+    input:
+        "analysis/braker/braker_nostop.faa"
+    output:
+        "analysis/braker/braker_nostop.faa.pdb"
+    conda:
+        "envs/blast.yaml"
+    shell:
+        "makeblastdb -in {input} -dbtype prot"
+
+rule funannotate_dload_busco:
+    output:
+        "analysis/funannotate/data/{lineage}"
+    params:
+        host_dir = "https://busco-data.ezlab.org/v5/data/lineages/"
+    shell:
+        """
+        wget -r -np -nH -e robots=off --cut-dirs=5 -A '{wildcards.lineage}.*.tar.gz' {params.host_dir}
+        tar xfz {params.lineage}.*.tar.gz -C $(dirname {output})/
+        """
+
+rule funannotate_update_products:
+    input:
+        origin = "analysis/funannotate/data/ncbi_cleaned_gene_products.txt.original",
+        custom = "metadata/ncbi_cleaned_gene_products_custom.txt"
+    output:
+        "analysis/funannotate/data/ncbi_cleaned_gene_products.txt"
+    shell:
+        "cat <(grep '^#' {input.origin}) <(cat {input.custom}) <(grep -v '^#' {input.origin}) > {output}"
 
 rule funannotate_busco:
     input:
-        data = "analysis/funannotate/data",
+        data = "analysis/funannotate/data/{lineage}".format(lineage = busco_lineage),
         faa = "analysis/braker/braker_nostop.faa"
     output:
         directory("analysis/funannotate/results/annotate_misc/run_busco")
-    params:
-        host_dir = "https://busco-data.ezlab.org/v5/data/lineages/",
-        lineage = busco_lineage
     shadow:
         "minimal"
     conda:
@@ -547,33 +593,104 @@ rule funannotate_busco:
         10
     shell:
         """
-        $CONDA_PREFIX/lib/python*/site-packages/funannotate/aux_scripts/funannotate-BUSCO2.py -i {input.faa} -m proteins -l {input.data}/{params.lineage} -o busco -c {threads} -f
+        $CONDA_PREFIX/lib/python*/site-packages/funannotate/aux_scripts/funannotate-BUSCO2.py -i {input.faa} -m proteins -l {input.data} -o busco -c {threads} -f
         mv run_busco {output}
         """
 
+rule merge_gff:
+    input:
+        "analysis/braker/braker.gff"
+    output:
+        "analysis/braker/braker_merged.gff"
+    conda:
+        "envs/gff.yaml"
+    shell:
+        "gffread --keep-genes -M -o {output} {input}"
+
 rule funannotate:
     input:
-        iprscan = "analysis/interproscan/braker.faa.xml",
+        iprscan = "analysis/interproscan/braker_nostop.faa.xml",
         eggnog = "analysis/eggnog/emapper/eggnog.emapper.annotations",
         busco = "analysis/funannotate/results/annotate_misc/run_busco",
-        data = "analysis/funannotate/data",
         gff = "analysis/braker/braker.gff",
-        fasta = "analysis/assembly/genome.fa"
+        fasta = "analysis/assembly/genome.fa",
+        ncbi = "analysis/funannotate/data/ncbi_cleaned_gene_products.txt",
+        info = "analysis/funannotate/data/funannotate-db-info.txt"
     output:
-        directory("analysis/funannotate/results/annotate_results")
+        dirname = directory("analysis/funannotate/results/annotate_results"),
+        tbl = "analysis/funannotate/results/annotate_results/{species}_{strain}.tbl".format(species = genus_species.replace(' ', '_'), strain = strain)
     log:
         "analysis/funannotate/funannotate-annotate.log"
     params:
         species = genus_species,
         strain = strain,
-        lineage = busco_lineage
+        lineage = busco_lineage,
+        datadir = "analysis/funannotate/data"
     conda:
         "envs/funannotate.yaml"
     threads:
         10
     shell:
         """
-        FUNANNOTATE_DB={input.data} funannotate annotate -o $(dirname {output}) --cpus {threads} --rename 1 \
+        FUNANNOTATE_DB={params.datadir} funannotate annotate -o $(dirname {output.dirname}) --cpus {threads} --rename 1 \
             --species '{params.species}' --strain '{params.strain}' --busco_db {params.lineage} \
-            --fasta {input.fasta} --gff {input.gff} -d {input.data} --eggnog {input.eggnog} --iprscan {input.iprscan} &> {log}
+            --fasta {input.fasta} --gff {input.gff} -d {params.datadir} --eggnog {input.eggnog} --iprscan {input.iprscan} &> {log}
         """
+
+rule collect_annotations:
+    input:
+        tbl = "analysis/funannotate/results/annotate_results/{species}_{strain}.tbl".format(species = genus_species.replace(' ', '_'), strain = strain),
+        trna = "analysis/ncrna/trna.sec",
+        rrna = "analysis/ncrna/rrna.tblout",
+        fsa = "analysis/assembly/genome.fa",
+        contamination = "analysis/contamination/all.bed"
+    output:
+        tbl = "output/submission/annot.tbl",
+        fsa = "output/submission/annot.fsa"
+    params:
+        contam_threshold = 0.6,
+        trna_threshold = 30,
+        trna_software = "tRNAscan-SE:2.0.11",
+        rrna_threshold = 1e-10,
+        rrna_software = "infernal:1.1.4",
+        rrna_database = "Rfam:14.9",
+        species = genus_species,
+        strain = strain
+    conda:
+        "envs/biopython.yaml"
+    script:
+        "scripts/annotations.py"
+
+rule table2asn:
+    input:
+        tbl = "output/submission/annot.tbl",
+        fsa = "output/submission/annot.fsa",
+        sbt = "metadata/submission/template.sbt",
+        cmt = "metadata/submission/comment.cmt",
+        txt = "metadata/submission/comment.txt"
+    output:
+        sqn = "output/submission/annot.sqn",
+        gbf = "output/submission/annot.gbf"
+    shell:
+        "table2asn -t {input.sbt} -indir $(dirname {output.sqn}) -w {input.cmt} -V b -Y {input.txt} -M n -Z -gaps-min 10 -l paired-ends"
+
+rule genomad_init:
+    output:
+        directory("analysis/genomad/data")
+    conda:
+        "envs/genomad.yaml"
+    shell:
+        "genomad download-dataset $(dirname {output})"
+
+rule genomad_run:
+    input:
+        db = "analysis/genomad/data",
+        fasta = "analysis/assembly/genome.fa"
+    output:
+        directory("analysis/genomad/results")
+    conda:
+        "envs/genomad.yaml"
+    threads:
+        40
+    shell:
+        "genomad end-to-end {input.fasta} {output} {input.db}"

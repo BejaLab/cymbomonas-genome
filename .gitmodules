@@ -1,0 +1,6 @@
+[submodule "workflow/lib/jiffy-infernal-hmmer-scripts"]
+	path = workflow/lib/jiffy-infernal-hmmer-scripts
+	url = git@github.com:nawrockie/jiffy-infernal-hmmer-scripts.git
+[submodule "workflow/lib/biocode"]
+	path = workflow/lib/biocode
+	url = git@github.com:jorvis/biocode.git

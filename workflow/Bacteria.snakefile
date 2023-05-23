@@ -3,7 +3,7 @@ from Bio import SeqIO
 import yaml
 from os.path import basename
 
-fasta = SeqIO.parse("contamination/bacteria.fna", "fasta")
+fasta = SeqIO.parse("bacteria/jcf7180000139289_circular.fna", "fasta")
 records = SeqIO.to_dict(fasta)
 
 rule all:
@@ -12,7 +12,7 @@ rule all:
 
 rule fetch_seq:
     input:
-        "contamination/bacteria.fna"
+        "bacteria/jcf7180000139289_circular.fna"
     output:
         "analysis/contamination/pgap/{id}.fna"
     conda:
@@ -62,7 +62,7 @@ rule pgap:
 
 rule gbf2tbl:
     input:
-        script = "workflow/tools/gbf2tbl.pl",
+        script = "workflow/lib/gbf2tbl.pl",
         pgap   = "analysis/contamination/pgap/{id}/annot.gbk"
     output:
         "analysis/contamination/pgap/{id}/annot.tbl"
@@ -70,4 +70,3 @@ rule gbf2tbl:
         "envs/perl.yaml"
     shell:
         "perl {input.script} {input.pgap}"
-

@@ -5,7 +5,7 @@ sra:
     - accession: 'ERR2193926'
 tp_assembly: true
 organism:
-    genus_species: 'Escherichia coli' 
+    genus_species: 'Tepidicaulis marinus' 
 contact_info:
     last_name: 'Doe'
     first_name: 'Jane'
