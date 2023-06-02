@@ -1,4 +1,5 @@
 channels:
+ - conda-forge
  - bioconda
 dependencies:
- - busco=5.4.6
+ - busco=5.4.7

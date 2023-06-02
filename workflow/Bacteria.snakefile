@@ -1,28 +1,24 @@
 
-from Bio import SeqIO
 import yaml
 from os.path import basename
 
-fasta = SeqIO.parse("bacteria/jcf7180000139289_circular.fna", "fasta")
-records = SeqIO.to_dict(fasta)
+ids ,= glob_wildcards("bacteria/{id}.fna")
 
 rule all:
     input:
-        expand("analysis/contamination/pgap/{id}/annot.tbl", id = records.keys())
+        expand("analysis/contamination/pgap/{id}/annot.tbl", id = ids)
 
-rule fetch_seq:
+rule copy_seq:
     input:
-        "bacteria/jcf7180000139289_circular.fna"
+        "bacteria/{id}.fna"
     output:
         "analysis/contamination/pgap/{id}.fna"
-    conda:
-        "envs/tools.yaml"
     shell:
-        "seqkit grep -p {wildcards.id} -o {output} {input}"
+        "cp {input} {output}"
 
 rule copy_submol:
     input:
-        "workflow/metadata/submol.yaml"
+        "bacteria/{id}_submol.yaml"
     output:
         "analysis/contamination/pgap/{id}_submol.yaml"
     shell:

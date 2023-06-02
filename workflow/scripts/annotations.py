@@ -134,7 +134,7 @@ with open(rrna_file) as fh:
             if target_name in products and float(e_value) < rrna_threshold:
                 lines = []
                 product, min_len = products[target_name]
-                if int(seq_to) - int(seq_from) + 1 < min_len:
+                if abs(int(seq_to) - int(seq_from)) + 1 < min_len:
                     rrna_desc = {
                         "note": "Fragment of {product}".format(product = product),
                         "inference": [
@@ -215,7 +215,9 @@ def get_genes(fh):
             tag, value = cols[3:5]
             if tag not in skip_tags:
                 if tag in record["desc"]:
-                    record["desc"][tag] += '; ' + value
+                    if not isinstance(record["desc"][tag], list):
+                        record["desc"][tag] = [ record["desc"][tag] ]
+                    record["desc"][tag].append(value)
                 else:
                     record["desc"][tag] = value
         else:
@@ -234,7 +236,6 @@ def fix_cds_coords(gene_record, cds_record, locus_tag):
         frame = int(cds_record["desc"]["codon_start"])
         g_start = int(gene_start.replace('<', ''))
         g_end   = int(gene_end.replace('>', ''))
-        forward = g_start < g_end
         cds_start = cds_record["coords"][0][0]
         cds_end   = cds_record["coords"][-1][1]
 
@@ -243,15 +244,12 @@ def fix_cds_coords(gene_record, cds_record, locus_tag):
             diff = abs(start - g_start)
             if 0 < diff < 3:
                 cds_record["coords"][0] = (gene_start, cds_record["coords"][0][1])
-                if forward:
-                   cds_record["desc"]["codon_start"] = frame + diff
+                cds_record["desc"]["codon_start"] = frame + diff
         if end_partial:
             end = int(cds_end.replace('>', ''))
             diff = abs(g_end - end)
             if 0 < diff < 3:
                 cds_record["coords"][-1] = (cds_record["coords"][-1][0], gene_end)
-                if not forward:
-                    cds_record["desc"]["codon_start"] = frame + diff
     return cds_record
 
 with open(tbl_file) as tbl:

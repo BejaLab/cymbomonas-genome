@@ -24,7 +24,8 @@ strain = "PLY_AMNH"
 
 rule all:
     input:
-        "output/submission/annot.sqn"
+        "output/submission/annot.sqn",
+        expand("analysis/busco/run_{lineage}/busco_sequences/single_copy_busco_sequences/", lineage = [ "eukaryota_odb10", "chlorophyta_odb10" ])
 
 rule hisat_index:
     input:
@@ -450,10 +451,10 @@ rule rrna:
     shell:
         "cmscan --cpu {threads} --cut_ga --rfam --nohmmonly --clanin {input.clanin} --oskip --fmt 2 -o {output.txt} --tblout {output.tblout} databases/Rfam/Rfam.cm {input.fasta} &> {log}"
 
-# NB: not used
 rule busco:
     input:
-        "analysis/braker/braker.faa"
+        "output/submission/annot.faa"
+        # "analysis/braker/braker.faa"
     output:
         "analysis/busco/run_{lineage}/full_table.tsv",
         "analysis/busco/short_summary.specific.{lineage}.busco.txt",
@@ -498,6 +499,9 @@ rule proteinortho:
 rule dload_eggnog:
     output:
         "analysis/eggnog/data/eggnog.db"
+    params:
+        taxid = 33090,
+        taxon = "Viridiplantae"
     conda:
         "envs/eggnog.yaml"
     shell:
@@ -567,7 +571,7 @@ rule funannotate_dload_busco:
     shell:
         """
         wget -r -np -nH -e robots=off --cut-dirs=5 -A '{wildcards.lineage}.*.tar.gz' {params.host_dir}
-        tar xfz {params.lineage}.*.tar.gz -C $(dirname {output})/
+        tar xfz {wildcards.lineage}.*.tar.gz -C $(dirname {output})/
         """
 
 rule funannotate_update_products:
@@ -596,16 +600,6 @@ rule funannotate_busco:
         $CONDA_PREFIX/lib/python*/site-packages/funannotate/aux_scripts/funannotate-BUSCO2.py -i {input.faa} -m proteins -l {input.data} -o busco -c {threads} -f
         mv run_busco {output}
         """
-
-rule merge_gff:
-    input:
-        "analysis/braker/braker.gff"
-    output:
-        "analysis/braker/braker_merged.gff"
-    conda:
-        "envs/gff.yaml"
-    shell:
-        "gffread --keep-genes -M -o {output} {input}"
 
 rule funannotate:
     input:
@@ -673,6 +667,29 @@ rule table2asn:
         gbf = "output/submission/annot.gbf"
     shell:
         "table2asn -t {input.sbt} -indir $(dirname {output.sqn}) -w {input.cmt} -V b -Y {input.txt} -M n -Z -gaps-min 10 -l paired-ends"
+
+rule fix_gbk:
+    input:
+        "output/submission/annot.gbf"
+    output:
+        "output/submission/annot_fixed.gbf"
+    shell:
+        """
+        awk 't{{gsub("-","X")}}  /"/{{t=0}} /translation=/ {{t=1}} 1' {input} > {output}
+        """
+
+rule gbf_to_faa:
+    input:
+        "output/submission/annot_fixed.gbf"
+    output:
+        "output/submission/annot.faa"
+    params:
+        biotags = "workflow/lib/biotags.pl",
+        species = genus_species
+    shell:
+        """
+        perl {params.biotags} -i {input} -p CDS -t protein_id,product,translation | sed s/ncbi:// | awk -F\\\\t -vs={params.species:q} '{{printf">%s %s [%s]\\n%s\\n",$1,$2,s,$3}}' | seqkit seq > {output}
+        """
 
 rule genomad_init:
     output:

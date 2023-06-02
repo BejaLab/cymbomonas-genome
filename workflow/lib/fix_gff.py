@@ -20,10 +20,10 @@ for line in stdin:
         if not line.endswith(';'):
             line += ';'
         if feature == 'transcript':
-            attrs['Parent'] = attrs['locus']
+            attrs['Parent'] = attrs['locus'].replace('_', '')
             geneID = rename_id(attrs['geneID'], source)
             tr_count[geneID] += 1
-            attrs['ID'] = '{gene}.t{count}'.format(gene = geneID, count = tr_count[geneID])
+            attrs['ID'] = '{locus}_{gene}.t{count}'.format(locus = attrs['Parent'], gene = geneID, count = tr_count[geneID])
             tr_id = attrs['ID']
         if feature == 'CDS' or feature == 'exon':
             attrs['Parent'] = tr_id
