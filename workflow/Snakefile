@@ -24,6 +24,7 @@ strain = "PLY_AMNH"
 
 rule all:
     input:
+        "output/submission/annot_fixed.gbf",
         "output/submission/annot.sqn",
         expand("analysis/busco/run_{lineage}/busco_sequences/single_copy_busco_sequences/", lineage = [ "eukaryota_odb10", "chlorophyta_odb10" ])
 

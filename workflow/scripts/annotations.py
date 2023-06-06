@@ -41,11 +41,16 @@ def read_sec(fh):
             locus_tag, start, end = re1.search(data).groups()
             aa, anticodon, ac_start, ac_end, score = re2.search(data).groups()
             is_pseudo = 'pseudogene' in data
+            coords = [ (int(start), int(end)) ]
+            forward = coords[0][0] < coords[0][1]
             if search := re3.search(data):
-                i_start, i_end = search.groups()
-            else:
-                i_start = i_end = 0
-            yield locus_tag, int(start), int(end), aa, anticodon, int(ac_start), int(ac_end), float(score), is_pseudo, int(i_start), int(i_end)
+                i_start = int(search.group(1))
+                i_end   = int(search.group(2))
+                if forward:
+                    coords = [ (coords[0][0], i_start - 1), (i_end + 1, coords[0][1]) ]
+                else:
+                    coords = [ (coords[0][0], i_start + 1), (i_end - 1, coords[0][1]) ]
+            yield locus_tag, coords, aa, anticodon, int(ac_start), int(ac_end), float(score), is_pseudo
             data = ''
         else:
             data += line
@@ -72,16 +77,10 @@ locus_tags = locus_tag_gen(species)
 
 ncRNA = defaultdict(list)
 with open(trna_file) as fh:
-    for locus, start, end, aa, anticodon, ac_start, ac_end, score, is_pseudo, i_start, i_end in read_sec(fh):
+    for locus, trna_coords, aa, anticodon, ac_start, ac_end, score, is_pseudo in read_sec(fh):
         if score > trna_threshold and not is_pseudo:
             locus_tag = next(locus_tags)
             seqname = locus.rsplit(".", maxsplit = 1)[0]
-            if i_start > 0:
-                exon_end = i_start - 1
-                exon_start = i_end + 1
-                trna_coords = [ (start, exon_end), (exon_start, end) ]
-            else:
-                trna_coords = [ (start, end) ]
             if ac_start < ac_end:
                 ac_pos = '{start}..{end}'.format(start = ac_start, end = ac_end)
             else:
@@ -108,7 +107,7 @@ with open(trna_file) as fh:
             feature_type = "tRNA" if aa not in [ "Undet", "Sup" ] else "ncRNA"
 
             lines = []
-            lines += wrap_coords("gene", [ (start, end) ])
+            lines += wrap_coords("gene", [ (trna_coords[0][0], trna_coords[-1][1]) ])
             lines += wrap_desc(gene_desc)
             if aa in [ "Undet", "Sup" ]:
                 lines += wrap_coords("ncRNA", trna_coords)
@@ -228,7 +227,7 @@ def get_genes(fh):
         if len(gene) > 1:
             yield seqname, gene
 
-def fix_cds_coords(gene_record, cds_record, locus_tag):
+def fix_cds_coords(gene_record, cds_record):
     gene_start, gene_end = gene_record["coords"][0]
     start_partial = '<' in gene_start
     end_partial = '>' in gene_end
@@ -250,7 +249,21 @@ def fix_cds_coords(gene_record, cds_record, locus_tag):
             diff = abs(g_end - end)
             if 0 < diff < 3:
                 cds_record["coords"][-1] = (cds_record["coords"][-1][0], gene_end)
-    return cds_record
+
+def fix_short_intron(gene_record, child_record):
+    if len(child_record["coords"]) > 1:
+        start, end = child_record["coords"][0]
+        start2, end2 = child_record["coords"][1]
+        start = start.replace('<', '')
+        exon_len = abs(int(end) - int(start)) + 1
+        intron_len = abs(int(end) - int(start2)) - 1
+        if exon_len <= 3:
+            child_record["coords"].pop(0)
+            child_record["coords"][0] = '<' + start2, end2
+            gene_record["coords"][0] = '<' + start2, gene_record["coords"][0][1]
+            if "codon_start" in child_record["desc"]:
+                frame = int(child_record["desc"]["codon_start"])
+                child_record["desc"]["codon_start"] = frame + 3 - exon_len
 
 with open(tbl_file) as tbl:
     with open(tbl_out_file, 'w') as out:
@@ -266,7 +279,10 @@ with open(tbl_file) as tbl:
                 gene_record = gene[0]
                 for record in gene:
                     if record["feature"] == "CDS":
-                        record = fix_cds_coords(gene_record, record, locus_tag)
+                        fix_cds_coords(gene_record, record)
+                    if record["feature"] == "CDS" or record["feature"] == "mRNA":
+                        fix_short_intron(gene_record, record)
+                for record in gene:                    
                     feature, desc, coords = record["feature"], record["desc"], record["coords"]
                     desc["locus_tag"] = locus_tag
                     lines += wrap_coords(feature, coords)
