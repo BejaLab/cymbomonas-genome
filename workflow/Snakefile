@@ -26,7 +26,9 @@ rule all:
     input:
         "output/submission/annot_fixed.gbf",
         "output/submission/annot.sqn",
-        expand("analysis/busco/run_{lineage}/busco_sequences/single_copy_busco_sequences/", lineage = [ "eukaryota_odb10", "chlorophyta_odb10" ])
+        expand("analysis/busco/run_{lineage}/busco_sequences/single_copy_busco_sequences/", lineage = [ "eukaryota_odb10", "chlorophyta_odb10" ]),
+        "analysis/proteinortho/proteinortho.proteinortho.tsv",
+        "analysis/stringtie/assembly.gtf"
 
 rule hisat_index:
     input:
@@ -201,9 +203,9 @@ rule miniprot_cdhit:
     params:
         c = 0.9
     conda:
-        "envs/tools.yaml"
+        "envs/cd-hit.yaml"
     shell:
-        "cdhit -d 0 -c {params.c} -i {input} -o {output} 2> {log}"
+        "cd-hit -d 0 -c {params.c} -i {input} -o {output} 2> {log}"
 
 rule miniprot_bed:
     input:
@@ -450,7 +452,7 @@ rule rrna:
     threads:
         4
     shell:
-        "cmscan --cpu {threads} --cut_ga --rfam --nohmmonly --clanin {input.clanin} --oskip --fmt 2 -o {output.txt} --tblout {output.tblout} databases/Rfam/Rfam.cm {input.fasta} &> {log}"
+        "cmscan --cpu {threads} --cut_ga --rfam --nohmmonly --clanin {input.clanin} --oskip --fmt 2 -o {output.txt} --tblout {output.tblout} {input.cm} {input.fasta} &> {log}"
 
 rule busco:
     input:
@@ -474,27 +476,6 @@ rule busco:
         busco --lineage_dataset {wildcards.lineage} -f -i {input} -o busco -m protein -c {threads}
         mv busco/logs busco/logs_{wildcards.lineage}
         rsync -qav busco/ {params.dir}
-        """
-
-# NB: not used
-rule proteinortho:
-    input:
-        expand("analysis/species/{species}.fasta", species = species)
-    output:
-        "analysis/proteinortho/proteinortho.proteinortho.tsv"
-    shadow:
-        "minimal"
-    params:
-        dir = "analysis/proteinortho",
-        evalue = 1e-5
-    threads:
-        30
-    conda:
-        "envs/proteinortho.yaml"
-    shell:
-        """
-        proteinortho -project=proteinortho -cpus={threads} -e={params.evalue} {input}
-        mv proteinortho.* {params.dir}
         """
 
 rule dload_eggnog:
@@ -632,9 +613,18 @@ rule funannotate:
             --fasta {input.fasta} --gff {input.gff} -d {params.datadir} --eggnog {input.eggnog} --iprscan {input.iprscan} &> {log}
         """
 
-rule collect_annotations:
+rule patch_tbl:
     input:
         tbl = "analysis/funannotate/results/annotate_results/{species}_{strain}.tbl".format(species = genus_species.replace(' ', '_'), strain = strain),
+        patch = "metadata/tbl_patches/patch1.diff"
+    output:
+        "analysis/funannotate/results/annotate_results/{species}_{strain}.tbl.patched".format(species = genus_species.replace(' ', '_'), strain = strain)
+    shell:
+        "patch -u {input.tbl} -i {input.patch} -o {output}"
+
+rule collect_annotations:
+    input:
+        tbl = "analysis/funannotate/results/annotate_results/{species}_{strain}.tbl.patched".format(species = genus_species.replace(' ', '_'), strain = strain),
         trna = "analysis/ncrna/trna.sec",
         rrna = "analysis/ncrna/rrna.tblout",
         fsa = "analysis/assembly/genome.fa",
@@ -712,3 +702,38 @@ rule genomad_run:
         40
     shell:
         "genomad end-to-end {input.fasta} {output} {input.db}"
+
+rule proteinortho:
+    input:
+        "output/submission/annot.faa",
+        expand("references/{species}.faa", species = ref_species)
+    output:
+        "analysis/proteinortho/proteinortho.proteinortho.tsv"
+    params:
+        evalue = 1e-10,
+        sim = 0.5
+    shadow:
+        "minimal"
+    conda:
+        "envs/proteinortho.yaml"
+    threads:
+        20
+    shell:
+        """
+        proteinortho -project=proteinortho -cpus={threads} -e={params.evalue} -sim={params.sim} {input}
+        mv proteinortho.* $(dirname {output})
+        """
+
+rule stringtie_assemble:
+    ## Assemble transcripts based on read mapping (per treatment)
+    input:
+        expand("analysis/hisat/paired/{reads}.bam", reads = paired.keys()),
+        expand("analysis/hisat/single/{reads}.bam", reads = single.keys())
+    output:
+        "analysis/stringtie/assembly.gtf"
+    threads:
+        20
+    conda:
+        "envs/stringtie.yaml"
+    shell:
+        "stringtie {input} -o {output} -p {threads}"

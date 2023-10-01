@@ -257,7 +257,7 @@ def fix_short_intron(gene_record, child_record):
         start = start.replace('<', '')
         exon_len = abs(int(end) - int(start)) + 1
         intron_len = abs(int(end) - int(start2)) - 1
-        if exon_len <= 3:
+        if exon_len <= 3 and intron_len <= 10:
             child_record["coords"].pop(0)
             child_record["coords"][0] = '<' + start2, end2
             gene_record["coords"][0] = '<' + start2, gene_record["coords"][0][1]
@@ -282,10 +282,13 @@ with open(tbl_file) as tbl:
                         fix_cds_coords(gene_record, record)
                     if record["feature"] == "CDS" or record["feature"] == "mRNA":
                         fix_short_intron(gene_record, record)
+                coords_seen = { 'mRNA': [], 'CDS': [] } 
                 for record in gene:                    
                     feature, desc, coords = record["feature"], record["desc"], record["coords"]
-                    desc["locus_tag"] = locus_tag
-                    lines += wrap_coords(feature, coords)
-                    lines += wrap_desc(desc)
+                    if feature not in coords_seen or str(coords) not in coords_seen[feature]:
+                        desc["locus_tag"] = locus_tag
+                        lines += wrap_coords(feature, coords)
+                        lines += wrap_desc(desc)
+                        coords_seen[feature] = str(coords)
                 for line in lines:
                     out.write(line + '\n')
